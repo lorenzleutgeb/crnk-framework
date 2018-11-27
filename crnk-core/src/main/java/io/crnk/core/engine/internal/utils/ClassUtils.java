@@ -4,15 +4,22 @@ import io.crnk.core.exception.ResourceException;
 import io.crnk.core.utils.Optional;
 
 import java.lang.annotation.Annotation;
+import java.lang.reflect.AnnotatedElement;
+import java.lang.reflect.Array;
 import java.lang.reflect.Field;
+import java.lang.reflect.GenericArrayType;
 import java.lang.reflect.Method;
 import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
+import java.lang.reflect.TypeVariable;
+import java.lang.reflect.WildcardType;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 
 /**
@@ -24,36 +31,8 @@ public class ClassUtils {
 
 	public static final String PREFIX_GETTER_GET = "get";
 
-
-	private static final Map<Class<?>, Class<?>> primitiveWrapperMap = new HashMap();
-
-	private static final Map<Class<?>, Class<?>> wrapperPrimitiveMap;
-
-	static {
-		primitiveWrapperMap.put(Boolean.TYPE, Boolean.class);
-		primitiveWrapperMap.put(Byte.TYPE, Byte.class);
-		primitiveWrapperMap.put(Character.TYPE, Character.class);
-		primitiveWrapperMap.put(Short.TYPE, Short.class);
-		primitiveWrapperMap.put(Integer.TYPE, Integer.class);
-		primitiveWrapperMap.put(Long.TYPE, Long.class);
-		primitiveWrapperMap.put(Double.TYPE, Double.class);
-		primitiveWrapperMap.put(Float.TYPE, Float.class);
-		primitiveWrapperMap.put(Void.TYPE, Void.TYPE);
-		wrapperPrimitiveMap = new HashMap();
-		Iterator i$ = primitiveWrapperMap.keySet().iterator();
-
-		while (i$.hasNext()) {
-			Class primitiveClass = (Class) i$.next();
-			Class wrapperClass = primitiveWrapperMap.get(primitiveClass);
-			if (!primitiveClass.equals(wrapperClass)) {
-				wrapperPrimitiveMap.put(wrapperClass, primitiveClass);
-			}
-		}
-	}
-
 	private ClassUtils() {
 	}
-
 
 	public static boolean existsClass(String className) {
 		try {
@@ -205,7 +184,6 @@ public class ClassUtils {
 		return boolean.class.equals(returnType) || Boolean.class.equals(returnType);
 	}
 
-
 	public static Method findSetter(Class<?> beanClass, String fieldName, Class<?> fieldType) {
 		String upperCaseName = fieldName.substring(0, 1).toUpperCase() + fieldName.substring(1);
 
@@ -213,6 +191,7 @@ public class ClassUtils {
 		try {
 			return beanClass.getMethod(methodName, fieldType);
 		} catch (NoSuchMethodException e1) {
+			// This is okay, there's just no trivial setter. Carry on searching below.
 		}
 
 		Method[] methods = beanClass.getMethods();
@@ -282,10 +261,7 @@ public class ClassUtils {
 		while (currentClass != null && currentClass != Object.class) {
 			for (Method method : currentClass.getDeclaredMethods()) {
 				if (!method.isSynthetic() && isSetter(method)) {
-					Method v = result.get(method.getName());
-					if (v == null) {
-						result.put(method.getName(), method);
-					}
+					result.putIfAbsent(method.getName(), method);
 				}
 			}
 			currentClass = currentClass.getSuperclass();
@@ -343,7 +319,6 @@ public class ClassUtils {
 	}
 
 	private static boolean isNonBooleanGetter(Method method) {
-
 		if (!method.getName().startsWith("get")) {
 			return false;
 		}
@@ -358,7 +333,6 @@ public class ClassUtils {
 	}
 
 	private static boolean isSetter(Method method) {
-
 		if (!method.getName().startsWith("set")) {
 			return false;
 		}
@@ -369,14 +343,26 @@ public class ClassUtils {
 		return method.getParameterTypes().length == 1;
 	}
 
+	/**
+	 * Given a type, this method resolves the corresponding raw type.
+	 *
+	 * This method works if {@code type} is of type {@link Class}, or {@link ParameterizedType}.
+	 * Its shortcoming is that it cannot resolve {@link TypeVariable} and will always return {@code Object.class},
+	 * not attempting to resolve the concrete type that the variable is to be substituted with.
+	 *
+	 * Please use tools like {@link io.crnk.core.engine.information.bean.BeanInformation} and
+	 * {@link io.crnk.core.engine.information.bean.BeanAttributeInformation} instead.
+	 */
+	@Deprecated
 	public static Class<?> getRawType(Type type) {
 		if (type instanceof Class) {
 			return (Class<?>) type;
 		} else if (type instanceof ParameterizedType) {
 			return getRawType(((ParameterizedType) type).getRawType());
-		} else {
-			throw new IllegalStateException("unknown type: " + type);
+		} else if (type instanceof TypeVariable<?>) {
+			return getRawType(((TypeVariable<?>) type).getBounds()[0]);
 		}
+		throw new IllegalStateException("unknown type: " + type);
 	}
 
 	public static boolean isPrimitiveType(Class<?> type) {
@@ -394,5 +380,155 @@ public class ClassUtils {
 			return ((ParameterizedType) genericType).getActualTypeArguments()[0];
 		}
 		return genericType;
+	}
+
+	/**
+	 * Get the actual type arguments a subclass has used to extend a generic superclass.
+	 *
+	 * @param type the subclass
+	 * @return a mapping from type variables to actual types
+	 */
+	public static Map<Type, Type> getTypeArguments(Type type) {
+		Objects.requireNonNull(type);
+
+		Map<Type, Type> resolvedTypes = new HashMap<>();
+
+		while (type != null) {
+			if (type instanceof Class) {
+				type = ((Class) type).getGenericSuperclass();
+				continue;
+			}
+
+			final ParameterizedType parameterizedType = (ParameterizedType) type;
+			final Class<?> rawType = (Class) parameterizedType.getRawType();
+
+			final Type[] arguments = parameterizedType.getActualTypeArguments();
+			final TypeVariable<? extends Class<?>>[] parameters = rawType.getTypeParameters();
+
+			// In case the number of actual type arguments does not match the number of
+			// parameters, this will throw an IndexOutOfBoundsException, but we cannot
+			// do anything in that case, really.
+			for (int i = 0; i < arguments.length; i++) {
+				resolvedTypes.put(parameters[i], arguments[i]);
+			}
+
+			type = rawType.getGenericSuperclass();
+		}
+
+		return normalize(resolvedTypes);
+	}
+
+	private static <T> Map<T, T> normalize(Map<T, T> map) {
+		for (Map.Entry<T, T> entry : map.entrySet()) {
+			final T key = entry.getKey();
+			T current = entry.getValue();
+			while (map.containsKey(current) && current != key) {
+				current = map.get(current);
+			}
+			map.put(entry.getKey(), current);
+		}
+		return map;
+	}
+
+	@Deprecated
+	public static boolean equalUptoRenaming(Type a, Type b, Map<Type, Type> resolvedTypes) {
+		// First, a fast path for the common case of dealing with plain classes.
+		if (a instanceof Class<?> && b instanceof Class<?>) {
+			return a.equals(b);
+		}
+
+		final Map<Type, Type> renamings = new HashMap<>();
+		for (Map.Entry<Type, Type> entry : resolvedTypes.entrySet()) {
+			if (entry.getKey() instanceof TypeVariable && entry.getValue() instanceof TypeVariable) {
+				renamings.put(entry.getKey(), entry.getValue());
+			}
+		}
+
+		final Type ax = ClassUtils.substituteGenerics(a, renamings);
+		final Type bx = ClassUtils.substituteGenerics(b, renamings);
+		return ax.equals(bx);
+	}
+
+	/**
+	 * This should be upstreamed.
+	 */
+	@Deprecated
+	public static Type substituteGenerics(Type genericType, Map<Type, Type> typeArguments) {
+		if (genericType instanceof Class<?>) {
+			return genericType;
+		}
+		if (genericType instanceof TypeVariable) {
+			return typeArguments.getOrDefault(genericType, genericType);
+		}
+		if (genericType instanceof WildcardType) {
+			return substituteGenerics(((WildcardType) genericType).getUpperBounds()[0], typeArguments);
+		}
+		if (genericType instanceof ParameterizedType) {
+			final ParameterizedType parameterizedType = (ParameterizedType) genericType;
+			final Type[] actualTypeArguments =  parameterizedType.getActualTypeArguments();
+			final Type[] resolvedTypeArguments = new Type[actualTypeArguments.length];
+
+			boolean changed = false;
+			for (int i = 0; i < actualTypeArguments.length; i++) {
+				resolvedTypeArguments[i] = substituteGenerics(actualTypeArguments[i], typeArguments);
+				changed = changed || (resolvedTypeArguments[i] != actualTypeArguments[i]);
+			}
+
+			return changed ? new ResolvedParameterizedType(parameterizedType,  resolvedTypeArguments) : parameterizedType;
+		}
+		throw new IllegalStateException("Cannot substitute generics for this implementation of Type.");
+	}
+
+	@Deprecated
+	private static class ResolvedParameterizedType implements ParameterizedType {
+		private final ParameterizedType original;
+		private final Type[] resolvedTypeArguments;
+
+		private ResolvedParameterizedType(ParameterizedType original, Type[] resolvedTypeArguments) {
+			Objects.requireNonNull(original);
+			Objects.requireNonNull(resolvedTypeArguments);
+
+			this.original = original;
+			this.resolvedTypeArguments = resolvedTypeArguments;
+		}
+
+		public Type[] getGenericActualTypeArguments() {
+			return original.getActualTypeArguments();
+		}
+
+		@Override
+		public Type[] getActualTypeArguments() {
+			return resolvedTypeArguments;
+		}
+
+		@Override
+		public Type getRawType() {
+			return original.getRawType();
+		}
+
+		@Override
+		public Type getOwnerType() {
+			return original.getOwnerType();
+		}
+
+		@Override
+		public boolean equals(Object o) {
+			if (this == o) {
+				return true;
+			}
+			if (o == null || getClass() != o.getClass()) {
+				return false;
+			}
+			ResolvedParameterizedType that = (ResolvedParameterizedType) o;
+			return original.equals(that.original) &&
+				Arrays.equals(resolvedTypeArguments, that.resolvedTypeArguments);
+		}
+
+		@Override
+		public int hashCode() {
+			int result = Objects.hash(original);
+			result = 31 * result + Arrays.hashCode(resolvedTypeArguments);
+			return result;
+		}
 	}
 }
