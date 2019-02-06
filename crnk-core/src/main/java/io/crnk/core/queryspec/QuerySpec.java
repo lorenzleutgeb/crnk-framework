@@ -11,6 +11,7 @@ import io.crnk.core.resource.list.DefaultResourceList;
 import io.crnk.core.resource.list.ResourceList;
 import io.crnk.core.resource.meta.DefaultPagedMetaInformation;
 
+import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -21,7 +22,8 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Optional;
 
-public class QuerySpec {
+public class QuerySpec implements Serializable {
+	private static final long serialVersionUID = 601L;
 
 	private Class<?> resourceClass;
 
